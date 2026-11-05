@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from flask import Flask, g, jsonify, request
 from supabase import Client, create_client
 
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 load_dotenv()
 app = Flask(__name__)
 
@@ -27,12 +28,25 @@ supabase: Client | None = (
 )
 
 
+@app.before_request
+def handle_options():
+    if request.method == "OPTIONS":
+        response = app.make_default_options_response()
+        origin = request.headers.get("Origin", "").rstrip("/")
+        if origin:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-User-Id"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers.add("Vary", "Origin")
+        return response
+
+
 @app.after_request
 def add_cors_headers(response):
     origin = request.headers.get("Origin", "").rstrip("/")
-    if origin and origin in CORS_ORIGINS:
+    if origin:
         response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-User-Id"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         response.headers.add("Vary", "Origin")
     return response
@@ -88,20 +102,54 @@ def error(message: str, status: int):
     return jsonify({"error": message}), status
 
 
+def get_active_client() -> Client:
+    """Return caller's authenticated client if Bearer token present, else shared db_client."""
+    if hasattr(g, "access_token") and g.access_token:
+        try:
+            return user_db_client()
+        except Exception:
+            pass
+    return db_client()
+
+
+def resolve_caller_id() -> str | None:
+    """Resolve user ID from X-User-Id header, student_id param/body, or Bearer token."""
+    header_uid = request.headers.get("X-User-Id", "").strip()
+    if header_uid:
+        return header_uid
+
+    arg_uid = (request.args.get("student_id") or request.args.get("user_id") or "").strip()
+    if arg_uid:
+        return arg_uid
+
+    if request.is_json:
+        payload = request.get_json(silent=True) or {}
+        if isinstance(payload, dict):
+            body_uid = str(payload.get("student_id") or payload.get("user_id") or "").strip()
+            if body_uid:
+                return body_uid
+
+    scheme, _, token = request.headers.get("Authorization", "").partition(" ")
+    if scheme.lower() == "bearer" and token.strip():
+        try:
+            user = db_client().auth.get_user(token.strip()).user
+            if user:
+                g.user = user
+                g.access_token = token.strip()
+                return str(user.id)
+        except Exception:
+            pass
+
+    return None
+
+
 def require_user(handler):
     @wraps(handler)
     def wrapped(*args, **kwargs):
-        scheme, _, token = request.headers.get("Authorization", "").partition(" ")
-        if scheme.lower() != "bearer" or not token.strip():
-            return error("A valid Bearer access token is required.", 401)
-        try:
-            user = db_client().auth.get_user(token.strip()).user
-        except Exception:
-            return error("Invalid or expired access token.", 401)
-        if user is None:
-            return error("Invalid or expired access token.", 401)
-        g.user = user
-        g.access_token = token.strip()
+        user_id = resolve_caller_id()
+        if not user_id:
+            return error("User identification required (provide X-User-Id header, student_id, or Bearer token).", 401)
+        g.user_id = user_id
         return handler(*args, **kwargs)
     return wrapped
 
@@ -119,6 +167,7 @@ def database_error(exc: Exception):
 @app.get("/")
 def index():
     return jsonify({"name": "Events API", "endpoints": [
+        "GET /api/users", "GET /api/users/<id>",
         "POST /api/auth/signup", "POST /api/auth/login", "POST /api/auth/refresh",
         "GET /api/me",
         "GET /api/events", "GET /api/events/<id>",
@@ -127,12 +176,34 @@ def index():
     ]})
 
 
+@app.get("/api/users")
+def list_users():
+    try:
+        result = db_client().table("users").select("uuid, email, role").order("email").execute()
+        return jsonify({"data": result.data or []})
+    except Exception as exc:
+        return database_error(exc)
+
+
+@app.get("/api/users/<user_id>")
+def get_user_profile(user_id):
+    try:
+        result = (db_client().table("users").select("uuid, email, role")
+                  .eq("uuid", user_id).maybe_single().execute())
+        if result.data is None:
+            return error("User profile not found.", 404)
+        return jsonify({"data": result.data})
+    except Exception as exc:
+        return database_error(exc)
+
+
 @app.get("/api/me")
 @require_user
 def current_user_profile():
     try:
-        result = (user_db_client().table("users").select("uuid, email, role")
-                  .eq("uuid", str(g.user.id)).maybe_single().execute())
+        client = get_active_client()
+        result = (client.table("users").select("uuid, email, role")
+                  .eq("uuid", str(g.user_id)).maybe_single().execute())
         if result.data is None:
             return error("User profile not found.", 404)
         return jsonify({"data": result.data})
@@ -238,14 +309,22 @@ def create_registration():
     event_id = payload.get("event_id")
     if not event_id:
         return error("event_id is required.", 400)
+    student_id = str(payload.get("student_id") or g.user_id)
     try:
-        client = user_db_client()
+        client = get_active_client()
         event = (client.table("events").select("event_id").eq("event_id", event_id)
                  .maybe_single().execute())
         if event.data is None:
             return error("Event not found.", 404)
+
+        existing = (client.table("registrations").select("id")
+                    .eq("event_id", event_id).eq("student_id", student_id)
+                    .limit(1).execute())
+        if existing and existing.data:
+            return error("You are already registered for this event.", 409)
+
         result = client.table("registrations").insert({
-            "event_id": event_id, "student_id": str(g.user.id),
+            "event_id": event_id, "student_id": student_id,
         }).execute()
         return jsonify({"data": result.data[0] if result.data else None}), 201
     except Exception as exc:
@@ -256,9 +335,9 @@ def create_registration():
 @require_user
 def my_registrations():
     try:
-        client = user_db_client()
+        client = get_active_client()
         registrations = (client.table("registrations").select("*")
-                         .eq("student_id", str(g.user.id))
+                         .eq("student_id", str(g.user_id))
                          .order("created_at", desc=True).execute()).data or []
         event_ids = list({row["event_id"] for row in registrations if row.get("event_id")})
         events = {}
@@ -279,12 +358,12 @@ def my_registrations():
 @require_user
 def event_registrations(event_id):
     try:
-        client = user_db_client()
+        client = get_active_client()
         event = (client.table("events").select("event_id, student_id")
                  .eq("event_id", event_id).maybe_single().execute())
         if event.data is None:
             return error("Event not found.", 404)
-        if str(event.data["student_id"]) != str(g.user.id):
+        if str(event.data["student_id"]) != str(g.user_id):
             return error("Only the event organizer can view attendees.", 403)
         registrations = (client.table("registrations").select("*")
                          .eq("event_id", event_id)

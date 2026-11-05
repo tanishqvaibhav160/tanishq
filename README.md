@@ -21,17 +21,19 @@ The API uses `events.event_id` and `events.student_id`, `registrations.student_i
 
 | Method | Route | Access | Result |
 |---|---|---|---|
+| GET | `/api/users` | Public | List all users (`uuid`, `email`, `role`) for profile selection |
+| GET | `/api/users/<id>` | Public | User profile details |
 | POST | `/api/auth/signup` | Public | Create an Auth account and student profile |
 | POST | `/api/auth/login` | Public | Sign in and return access/refresh tokens |
 | POST | `/api/auth/refresh` | Public | Refresh an expired access token |
-| GET | `/api/me` | Signed in | Current user's profile from `users` |
+| GET | `/api/me` | User / Signed in | Profile from `users` (via `X-User-Id` header, `student_id`, or Bearer token) |
 | GET | `/api/events?limit=50&offset=0&q=text` | Public | Browse events, optionally search titles and paginate |
 | GET | `/api/events/<id>` | Public | Event details, or 404 |
-| POST | `/api/registrations` | Signed in | JSON `{ "event_id": "<uuid>" }`; creates a registration (201), duplicate returns 409 |
-| GET | `/api/me/registrations` | Signed in | Current user's registrations with an `event` object |
+| POST | `/api/registrations` | User / Signed in | JSON `{ "event_id": "<uuid>", "student_id": "<uuid>" }`; creates a registration (201), duplicate returns 409 |
+| GET | `/api/me/registrations` | User / Signed in | Current user's registrations with an `event` object |
 | GET | `/api/events/<id>/registrations` | Event owner | Attendee registrations with a `user` profile object (`uuid`, `email`, `role`); other users receive 403 |
 
-Responses use JSON. Errors use `{ "error": "..." }`.
+Responses use JSON. Errors use `{ "error": "..." }`. User identification can be provided via `X-User-Id` header, request body `student_id`, or `Authorization: Bearer <token>`.
 
 The API reads related event and profile rows separately, so these responses do
 not depend on PostgREST relationship embedding being available or cached.
