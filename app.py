@@ -151,9 +151,25 @@ def event_registrations(event_id):
             return error("Event not found.", 404)
         if str(event.data["organizer_id"]) != str(g.user.id):
             return error("Only the event organizer can view attendees.", 403)
-        result = (client.table("registrations").select("*, users(id, name, email)")
-                  .eq("event_id", event_id).order("created_at").execute())
-        return jsonify({"data": result.data})
+        registrations = (client.table("registrations").select("*")
+                         .eq("event_id", event_id)
+                         .order("created_at").execute()).data or []
+
+        # registrations.user_id references auth.users, while public.users is a
+        # separate profile table. Without a public foreign key PostgREST cannot
+        # embed users(...) in the registrations query, so load profiles by ID.
+        user_ids = list({row["user_id"] for row in registrations if row.get("user_id")})
+        profiles = {}
+        if user_ids:
+            profile_rows = (client.table("users").select("id, name, email")
+                            .in_("id", user_ids).execute()).data or []
+            profiles = {str(profile["id"]): profile for profile in profile_rows}
+
+        attendees = [
+            {**registration, "user": profiles.get(str(registration["user_id"]))}
+            for registration in registrations
+        ]
+        return jsonify({"data": attendees})
     except Exception as exc:
         return database_error(exc)
 
