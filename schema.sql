@@ -49,6 +49,11 @@ create policy "users see own profile or event attendees" on public.users
     )
   );
 
+drop policy if exists "students create own profile" on public.users;
+create policy "students create own profile" on public.users
+  for insert to authenticated
+  with check (uuid = (select auth.uid()) and role = 'student');
+
 drop policy if exists "registrations visible to student or event owner" on public.registrations;
 drop policy if exists "registrations visible to attendee or organizer" on public.registrations;
 create policy "registrations visible to student or event owner" on public.registrations
@@ -65,5 +70,5 @@ create policy "students register themselves" on public.registrations
   for insert to authenticated with check (student_id = (select auth.uid()));
 
 grant select on public.events to anon, authenticated;
-grant select on public.users to authenticated;
+grant select, insert on public.users to authenticated;
 grant select, insert on public.registrations to authenticated;

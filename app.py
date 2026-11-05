@@ -15,10 +15,27 @@ app = Flask(__name__)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+CORS_ORIGINS = {"http://localhost:5173", "http://127.0.0.1:5173"}
+CORS_ORIGINS.update(
+    origin.strip().rstrip("/")
+    for origin in os.getenv("CORS_ORIGINS", "").split(",")
+    if origin.strip()
+)
 supabase: Client | None = (
     create_client(SUPABASE_URL, SUPABASE_KEY)
     if SUPABASE_URL and SUPABASE_KEY else None
 )
+
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin", "").rstrip("/")
+    if origin and origin in CORS_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers.add("Vary", "Origin")
+    return response
 
 
 def db_client() -> Client:
@@ -32,6 +49,39 @@ def user_db_client() -> Client:
     client = create_client(SUPABASE_URL, SUPABASE_KEY)
     client.postgrest.auth(g.access_token)
     return client
+
+
+def profile_client(access_token: str) -> Client:
+    client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    client.postgrest.auth(access_token)
+    return client
+
+
+def ensure_student_profile(user, access_token: str):
+    """Create the public profile needed by the schema's student foreign keys."""
+    client = profile_client(access_token)
+    profile = (client.table("users").select("uuid")
+               .eq("uuid", str(user.id)).maybe_single().execute())
+    if profile.data is None:
+        try:
+            client.table("users").insert({
+                "uuid": str(user.id),
+                "email": user.email,
+                "role": "student",
+            }).execute()
+        except Exception as exc:
+            # A concurrent login/signup may have created the profile already.
+            if getattr(exc, "code", None) != "23505":
+                raise
+
+
+def auth_session_data(session, user):
+    return {
+        "access_token": session.access_token,
+        "refresh_token": session.refresh_token,
+        "expires_at": session.expires_at,
+        "user": {"id": str(user.id), "email": user.email},
+    }
 
 
 def error(message: str, status: int):
@@ -69,10 +119,70 @@ def database_error(exc: Exception):
 @app.get("/")
 def index():
     return jsonify({"name": "Events API", "endpoints": [
+        "POST /api/auth/signup", "POST /api/auth/login", "POST /api/auth/refresh",
         "GET /api/events", "GET /api/events/<id>",
         "POST /api/registrations", "GET /api/me/registrations",
         "GET /api/events/<id>/registrations",
     ]})
+
+
+@app.post("/api/auth/signup")
+def signup():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return error("Request body must be a JSON object.", 400)
+    email = str(payload.get("email", "")).strip().lower()
+    password = payload.get("password")
+    if not email or not isinstance(password, str) or len(password) < 6:
+        return error("A valid email and password of at least 6 characters are required.", 400)
+    try:
+        auth = create_client(SUPABASE_URL, SUPABASE_KEY).auth
+        result = auth.sign_up({"email": email, "password": password})
+        if result.session:
+            ensure_student_profile(result.user, result.session.access_token)
+            return jsonify({"data": auth_session_data(result.session, result.user)}), 201
+        return jsonify({"data": {"confirmation_required": True}}), 201
+    except Exception as exc:
+        app.logger.exception("Supabase sign-up failed")
+        code = getattr(exc, "code", None)
+        if code in ("user_already_exists", "email_exists"):
+            return error("An account with this email already exists.", 409)
+        return error("Could not create the account. Check the email and password, then try again.", 400)
+
+
+@app.post("/api/auth/login")
+def login():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return error("Request body must be a JSON object.", 400)
+    email = str(payload.get("email", "")).strip().lower()
+    password = payload.get("password")
+    if not email or not isinstance(password, str) or not password:
+        return error("Email and password are required.", 400)
+    try:
+        auth = create_client(SUPABASE_URL, SUPABASE_KEY).auth
+        result = auth.sign_in_with_password({"email": email, "password": password})
+    except Exception:
+        app.logger.info("Supabase sign-in rejected", exc_info=True)
+        return error("Email or password is incorrect.", 401)
+    try:
+        ensure_student_profile(result.user, result.session.access_token)
+    except Exception as exc:
+        return database_error(exc)
+    return jsonify({"data": auth_session_data(result.session, result.user)})
+
+
+@app.post("/api/auth/refresh")
+def refresh_auth():
+    payload = request.get_json(silent=True)
+    refresh_token = payload.get("refresh_token") if isinstance(payload, dict) else None
+    if not refresh_token:
+        return error("refresh_token is required.", 400)
+    try:
+        result = create_client(SUPABASE_URL, SUPABASE_KEY).auth.refresh_session(refresh_token)
+        return jsonify({"data": auth_session_data(result.session, result.user)})
+    except Exception:
+        return error("Your session has expired. Please sign in again.", 401)
 
 
 @app.get("/api/events")
