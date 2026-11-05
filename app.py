@@ -87,7 +87,7 @@ def list_events():
         search = request.args.get("q", "").strip()
         if search:
             query = query.ilike("title", f"%{search}%")
-        result = query.order("starts_at").range(offset, offset + limit - 1).execute()
+        result = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
         return jsonify({"data": result.data, "limit": limit, "offset": offset})
     except Exception as exc:
         return database_error(exc)
@@ -97,7 +97,7 @@ def list_events():
 def get_event(event_id):
     try:
         result = (db_client().table("events").select("*")
-                  .eq("id", event_id).maybe_single().execute())
+                  .eq("event_id", event_id).maybe_single().execute())
         if result.data is None:
             return error("Event not found.", 404)
         return jsonify({"data": result.data})
@@ -116,12 +116,12 @@ def create_registration():
         return error("event_id is required.", 400)
     try:
         client = user_db_client()
-        event = (client.table("events").select("id").eq("id", event_id)
+        event = (client.table("events").select("event_id").eq("event_id", event_id)
                  .maybe_single().execute())
         if event.data is None:
             return error("Event not found.", 404)
         result = client.table("registrations").insert({
-            "event_id": event_id, "user_id": str(g.user.id),
+            "event_id": event_id, "student_id": str(g.user.id),
         }).execute()
         return jsonify({"data": result.data[0] if result.data else None}), 201
     except Exception as exc:
@@ -132,10 +132,21 @@ def create_registration():
 @require_user
 def my_registrations():
     try:
-        result = (user_db_client().table("registrations").select("*, events(*)")
-                  .eq("user_id", str(g.user.id))
-                  .order("created_at", desc=True).execute())
-        return jsonify({"data": result.data})
+        client = user_db_client()
+        registrations = (client.table("registrations").select("*")
+                         .eq("student_id", str(g.user.id))
+                         .order("created_at", desc=True).execute()).data or []
+        event_ids = list({row["event_id"] for row in registrations if row.get("event_id")})
+        events = {}
+        if event_ids:
+            event_rows = (client.table("events").select("*")
+                          .in_("event_id", event_ids).execute()).data or []
+            events = {str(event["event_id"]): event for event in event_rows}
+        data = [
+            {**registration, "event": events.get(str(registration["event_id"]))}
+            for registration in registrations
+        ]
+        return jsonify({"data": data})
     except Exception as exc:
         return database_error(exc)
 
@@ -145,28 +156,27 @@ def my_registrations():
 def event_registrations(event_id):
     try:
         client = user_db_client()
-        event = (client.table("events").select("id, organizer_id")
-                 .eq("id", event_id).maybe_single().execute())
+        event = (client.table("events").select("event_id, student_id")
+                 .eq("event_id", event_id).maybe_single().execute())
         if event.data is None:
             return error("Event not found.", 404)
-        if str(event.data["organizer_id"]) != str(g.user.id):
+        if str(event.data["student_id"]) != str(g.user.id):
             return error("Only the event organizer can view attendees.", 403)
         registrations = (client.table("registrations").select("*")
                          .eq("event_id", event_id)
                          .order("created_at").execute()).data or []
 
-        # registrations.user_id references auth.users, while public.users is a
-        # separate profile table. Without a public foreign key PostgREST cannot
-        # embed users(...) in the registrations query, so load profiles by ID.
-        user_ids = list({row["user_id"] for row in registrations if row.get("user_id")})
+        # Load profile rows separately so this works whether or not PostgREST
+        # has cached the users foreign-key relationship.
+        user_ids = list({row["student_id"] for row in registrations if row.get("student_id")})
         profiles = {}
         if user_ids:
-            profile_rows = (client.table("users").select("id, name, email")
-                            .in_("id", user_ids).execute()).data or []
-            profiles = {str(profile["id"]): profile for profile in profile_rows}
+            profile_rows = (client.table("users").select("uuid, email, role")
+                            .in_("uuid", user_ids).execute()).data or []
+            profiles = {str(profile["uuid"]): profile for profile in profile_rows}
 
         attendees = [
-            {**registration, "user": profiles.get(str(registration["user_id"]))}
+            {**registration, "user": profiles.get(str(registration["student_id"]))}
             for registration in registrations
         ]
         return jsonify({"data": attendees})
