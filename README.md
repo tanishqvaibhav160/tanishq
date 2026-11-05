@@ -24,6 +24,7 @@ The API uses `events.event_id` and `events.student_id`, `registrations.student_i
 | POST | `/api/auth/signup` | Public | Create an Auth account and student profile |
 | POST | `/api/auth/login` | Public | Sign in and return access/refresh tokens |
 | POST | `/api/auth/refresh` | Public | Refresh an expired access token |
+| GET | `/api/me` | Signed in | Current user's profile from `users` |
 | GET | `/api/events?limit=50&offset=0&q=text` | Public | Browse events, optionally search titles and paginate |
 | GET | `/api/events/<id>` | Public | Event details, or 404 |
 | POST | `/api/registrations` | Signed in | JSON `{ "event_id": "<uuid>" }`; creates a registration (201), duplicate returns 409 |

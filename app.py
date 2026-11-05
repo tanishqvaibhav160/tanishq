@@ -120,10 +120,24 @@ def database_error(exc: Exception):
 def index():
     return jsonify({"name": "Events API", "endpoints": [
         "POST /api/auth/signup", "POST /api/auth/login", "POST /api/auth/refresh",
+        "GET /api/me",
         "GET /api/events", "GET /api/events/<id>",
         "POST /api/registrations", "GET /api/me/registrations",
         "GET /api/events/<id>/registrations",
     ]})
+
+
+@app.get("/api/me")
+@require_user
+def current_user_profile():
+    try:
+        result = (user_db_client().table("users").select("uuid, email, role")
+                  .eq("uuid", str(g.user.id)).maybe_single().execute())
+        if result.data is None:
+            return error("User profile not found.", 404)
+        return jsonify({"data": result.data})
+    except Exception as exc:
+        return database_error(exc)
 
 
 @app.post("/api/auth/signup")
@@ -300,5 +314,5 @@ def route_not_found(_exc):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)),
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5001)),
             debug=os.getenv("FLASK_DEBUG") == "1")
