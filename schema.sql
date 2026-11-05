@@ -39,6 +39,7 @@ create policy "events are browseable" on public.events
   for select to anon, authenticated using (true);
 
 drop policy if exists "users see own profile or event attendees" on public.users;
+drop policy if exists "users see own profile or organizer sees attendees" on public.users;
 create policy "users see own profile or event attendees" on public.users
   for select to authenticated using (
     uuid = (select auth.uid()) or exists (
@@ -49,6 +50,7 @@ create policy "users see own profile or event attendees" on public.users
   );
 
 drop policy if exists "registrations visible to student or event owner" on public.registrations;
+drop policy if exists "registrations visible to attendee or organizer" on public.registrations;
 create policy "registrations visible to student or event owner" on public.registrations
   for select to authenticated using (
     student_id = (select auth.uid()) or exists (
@@ -58,6 +60,7 @@ create policy "registrations visible to student or event owner" on public.regist
   );
 
 drop policy if exists "students register themselves" on public.registrations;
+drop policy if exists "users register themselves" on public.registrations;
 create policy "students register themselves" on public.registrations
   for insert to authenticated with check (student_id = (select auth.uid()));
 

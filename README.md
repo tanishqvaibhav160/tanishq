@@ -4,7 +4,7 @@
 
 1. Create a virtual environment and install `requirements.txt`.
 2. Set `SUPABASE_URL` and `SUPABASE_KEY` in `Backend/.env`. Use the project's publishable/anon key, never a service role or secret key.
-3. For a new Supabase project, run `schema.sql` in the SQL Editor. It defines the `users`, `events`, and `registrations` flow shown in the database diagram. Existing tables are not changed by `CREATE TABLE IF NOT EXISTS`; back up and migrate existing data separately.
+3. Run `schema.sql` in the Supabase SQL Editor to create any missing tables and apply the indexes, grants, and RLS policies. It matches the supplied database diagram. It does not rename or migrate columns in a different existing schema.
 4. Start with `python app.py` from this directory. The API listens on port 5000 by default.
 
 Private routes require `Authorization: Bearer <Supabase access token>`. The signup flow must maintain a `users` row whose `uuid` equals the Supabase Auth user ID.
